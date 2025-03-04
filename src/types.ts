@@ -1,3 +1,19 @@
+export interface AlkanesCompilerOptions {
+  tempDir?: string;
+  dependencies?: Record<
+    string,
+    string | { git?: string; version?: string; features?: string[] }
+  >;
+  compiler?: {
+    optimizeLevel?: number;
+    target?: string;
+    features?: string[];
+  };
+  contracts?: {
+    outputDir?: string;
+  };
+}
+
 export type AlkanesPrimitive =
   | "u8"
   | "u16"

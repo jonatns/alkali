@@ -9,9 +9,11 @@
   },
   "scripts": {
     "build": "tsc",
+    "dev": "tsc -w",
     "test": "jest",
     "test:watch": "jest --watch",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "postinstall": "chmod +x ./dist/cli.js"
   },
   "files": [
     "dist",

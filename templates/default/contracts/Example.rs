@@ -13,8 +13,8 @@ impl AlkaneResponder for ExampleContract {
         let mut response = CallResponse::forward(&context.incoming_alkanes);
 
         match shift_or_err(&mut inputs)? {
-            /* initialize() */
             0 => Ok(response),
+            44 => Ok(response),
             _ => Err(anyhow!("unrecognized opcode")),
         }
     }

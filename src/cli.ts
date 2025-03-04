@@ -4,15 +4,7 @@ import { Command } from "commander";
 import { AlkanesCompiler, AlkanesContract } from "./index";
 import fs from "fs/promises";
 import path from "path";
-
-function handleCommandError(error: any) {
-  if (error instanceof Error) {
-    console.error("❌ Command failed:", error.message);
-  } else {
-    console.error("❌ Command failed:", error);
-  }
-  process.exit(1);
-}
+import { findContractFiles, handleCommandError, loadConfig } from "./helpers";
 
 const program = new Command();
 
@@ -84,36 +76,41 @@ program
   });
 
 program
-  .command("compile <file>")
-  .description("Compile a Rust contract to WASM")
-  .option("-o, --output <dir>", "Output directory", "./build")
-  .action(async (file: string, options) => {
+  .command("compile")
+  .description("Compile Alkanes contracts to WASM")
+  .argument("[file]", "Contract source file") // Use square brackets to make it optional
+  .option("-o, --output <dir>", "Output directory", "build")
+  .option("--optimize <level>", "Optimization level (0-3)", "3")
+  .action(async (file, options) => {
     try {
-      const sourceCode = await fs.readFile(file, "utf8");
-      const compiler = new AlkanesCompiler("http://localhost:3000");
+      console.log("🔨 Compiling contracts...");
 
-      const result = await compiler.compile(sourceCode);
-      if (!result) {
-        throw new Error("Compilation failed, no result returned");
+      const files = file ? [file] : await findContractFiles(["contracts"]);
+
+      if (files.length === 0) {
+        console.error("❌ No contract files found");
+        process.exit(1);
       }
-      const { bytecode, abi } = result;
 
-      // Create output directory
-      await fs.mkdir(options.output, { recursive: true });
+      const config = await loadConfig("alkali.config.json");
 
-      // Save bytecode
-      const wasmPath = path.join(options.output, "contract.wasm");
-      await fs.writeFile(wasmPath, Buffer.from(bytecode, "base64"));
+      const compiler = new AlkanesCompiler(config);
 
-      // Save ABI
-      const abiPath = path.join(options.output, "abi.json");
-      await fs.writeFile(abiPath, JSON.stringify(abi, null, 2));
-
-      console.log(`✅ Contract compiled successfully:
-- Bytecode: ${wasmPath}
-- ABI: ${abiPath}`);
+      for (const file of files) {
+        try {
+          console.log(`Compiling ${file}...`);
+          await compiler.compileFile(file, {
+            optimize: options.optimize,
+            output: options.output,
+          });
+          console.log(`✅ Successfully compiled ${file}`);
+        } catch (error) {
+          console.error(`❌ Failed to compile ${file}:`, error);
+        }
+      }
     } catch (error) {
-      handleCommandError(error);
+      console.error("❌ Compilation failed:", error);
+      process.exit(1);
     }
   });
 
@@ -138,8 +135,7 @@ program
       // Deploy
       const address = await contract.deploy(options.args || []);
 
-      console.log(`✅ Contract deployed successfully:
-Address: ${address}`);
+      console.log(`✅ Contract deployed successfully: Address: ${address}`);
     } catch (error) {
       handleCommandError(error);
     }

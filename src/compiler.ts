@@ -2,53 +2,117 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
-import {
-  AlkanesABI,
-  AlkanesMethod,
-  AlkanesPrimitive,
-  AlkanesType,
-  StorageKey,
-} from "./types";
+import { AlkanesABI } from "./types";
 
 const execAsync = promisify(exec);
 
-export class AlkanesCompiler {
-  private tempDir: string;
+export interface AlkanesCompilerOptions {
+  tempDir?: string;
+  target?: string;
+  optimize?: string | number;
+  output?: string;
+  dependencies?: Record<
+    string,
+    string | { git?: string; version?: string; features?: string[] }
+  >;
+}
 
-  constructor(tempDir: string = ".alkanes") {
-    this.tempDir = tempDir;
+export class AlkanesCompiler {
+  private options: AlkanesCompilerOptions;
+
+  constructor(options: AlkanesCompilerOptions = {}) {
+    this.options = {
+      tempDir: ".alkanes",
+      target: "wasm32-unknown-unknown",
+      optimize: 3,
+      output: "build",
+      dependencies: {},
+      ...options,
+    };
+  }
+
+  async compileFile(
+    filePath: string,
+    options: {
+      optimize?: string | number;
+      output?: string;
+    } = {}
+  ): Promise<{ bytecode: string; abi: AlkanesABI }> {
+    try {
+      console.log(`Reading contract file: ${filePath}`);
+      const sourceCode = await fs.readFile(filePath, "utf8");
+
+      const fileName = path.basename(filePath, ".rs");
+      const outputDir = options.output || this.options.output;
+
+      if (!outputDir) {
+        throw new Error("Output directory is not defined");
+      }
+
+      console.log(`Compiling ${fileName}...`);
+      const result = await this.compile(sourceCode, options);
+
+      if (!result) {
+        throw new Error("Compilation returned no result");
+      }
+
+      await fs.mkdir(outputDir, { recursive: true });
+
+      const wasmPath = path.join(outputDir, `${fileName}.wasm`);
+      await fs.writeFile(wasmPath, Buffer.from(result.bytecode, "base64"));
+      console.log(`WASM written to: ${wasmPath}`);
+
+      const abiPath = path.join(outputDir, `${fileName}.json`);
+      await fs.writeFile(abiPath, JSON.stringify(result.abi, null, 2));
+      console.log(`ABI written to: ${abiPath}`);
+
+      return result;
+    } catch (error) {
+      if (error instanceof Error) {
+        throw new Error(`Failed to compile ${filePath}: ${error.message}`);
+      }
+      throw error;
+    }
   }
 
   async compile(
-    sourceCode: string
-  ): Promise<{ bytecode: string; abi: AlkanesABI } | void> {
+    sourceCode: string,
+    options: {
+      optimize?: string | number;
+    } = {}
+  ): Promise<{ bytecode: string; abi: AlkanesABI }> {
     try {
       // Create temporary project
       await this.createProject(sourceCode);
 
-      // Run wasm-pack build
+      // Use options from method call or fall back to constructor options
+      const optimize = options.optimize || this.options.optimize;
+      const target = this.options.target;
+      const tempDir = this.options.tempDir;
+
+      if (!tempDir) {
+        throw new Error("Temp directory is not defined");
+      }
+
+      // Run direct cargo build with optimization level
       const { stdout, stderr } = await execAsync(
-        "wasm-pack build --target web",
-        { cwd: this.tempDir }
+        `cargo build --target ${target} --release --config "profile.release.opt-level=${optimize}"`,
+        { cwd: tempDir }
       );
 
       if (stderr) {
         console.warn("Build warnings:", stderr);
       }
 
-      // Read the WASM file
+      // Read the WASM file directly from target directory
       const wasmPath = path.join(
-        this.tempDir,
-        "pkg",
-        "alkanes_contract_bg.wasm"
+        tempDir,
+        `target/${target}/release/alkanes_contract.wasm`
       );
       const wasmBuffer = await fs.readFile(wasmPath);
 
       // Parse ABI from source code
       const abi = await this.parseABI(sourceCode);
-
-      // Clean up (optional)
-      // await fs.rm(this.tempDir, { recursive: true, force: true });
 
       return {
         bytecode: wasmBuffer.toString("base64"),
@@ -58,16 +122,21 @@ export class AlkanesCompiler {
       if (error instanceof Error) {
         throw new Error(`Compilation failed: ${error.message}`);
       }
+      throw new Error("Compilation failed with unknown error");
     }
   }
 
   private async createProject(sourceCode: string) {
-    // Create project directory
-    await fs.mkdir(this.tempDir, { recursive: true });
-    await fs.mkdir(path.join(this.tempDir, "src"), { recursive: true });
+    const tempDir = this.options.tempDir;
+    if (!tempDir) {
+      throw new Error("Temp directory is not defined");
+    }
 
-    // Create Cargo.toml
-    const cargoToml = `
+    await fs.mkdir(tempDir, { recursive: true });
+    await fs.mkdir(path.join(tempDir, "src"), { recursive: true });
+
+    // Start with base Cargo.toml
+    let cargoToml = `
 [package]
 name = "alkanes-contract"
 version = "0.1.0"
@@ -77,116 +146,62 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-alkanes-runtime = { git = "https://github.com/kungfuflex/alkanes-rs" }
-alkanes-support = { git = "https://github.com/kungfuflex/alkanes-rs" }
-metashrew-support = { git = "https://github.com/kungfuflex/alkanes-rs" }
+alkanes-runtime = { path = "../../alkanes-rs/crates/alkanes-runtime" }
+alkanes-support = { path = "../../alkanes-rs/crates/alkanes-support" }
+metashrew-support = { path = "../../alkanes-rs/crates/metashrew-support" }
+alkanes-macros = { path = "../../alkanes-rs/crates/alkanes-macros" }
+alkanes-types = { path = "../../alkanes-rs/crates/alkanes-types" }
 anyhow = "1.0"
-hex-lit = "0.1.1"
-    `;
+hex_lit = "0.1.1"
+`;
 
-    await fs.writeFile(path.join(this.tempDir, "Cargo.toml"), cargoToml);
-
-    // Write source code
-    await fs.writeFile(path.join(this.tempDir, "src", "lib.rs"), sourceCode);
-  }
-
-  public async parseABI(sourceCode: string): Promise<AlkanesABI> {
-    const methods: AlkanesMethod[] = [];
-    const opcodes: Record<string, number> = {};
-
-    // Updated regex to better match method comments and opcodes
-    // This looks for comments between match arms
-    const methodRegex = /\/\*\s*([^*]+?)\s*\*\/\s*(\d+)\s*=>/g;
-    let match;
-
-    while ((match = methodRegex.exec(sourceCode)) !== null) {
-      const [_, comment, opcode] = match;
-      const opcodeNum = parseInt(opcode);
-
-      // Parse method signature from comment
-      const methodInfo = this.parseMethodSignature(comment.trim());
-
-      // Add to methods array
-      const method: AlkanesMethod = {
-        opcode: opcodeNum,
-        name: methodInfo.name,
-        inputs: methodInfo.inputs,
-        outputs: methodInfo.outputs,
-      };
-      methods.push(method);
-
-      // Add to opcodes map
-      opcodes[methodInfo.name] = opcodeNum;
-    }
-
-    // Parse struct name (captures pub struct Name)
-    const structRegex = /pub\s+struct\s+(\w+)/;
-    const structMatch = sourceCode.match(structRegex);
-    const name = structMatch ? structMatch[1] : "UnknownContract";
-
-    // Parse storage
-    const storage: StorageKey[] = [];
-    const storageRegex = /StoragePointer::from_keyword\("([^"]+)"\)/g;
-    let storageMatch;
-    while ((storageMatch = storageRegex.exec(sourceCode)) !== null) {
-      storage.push({
-        key: storageMatch[1],
-        type: "Vec<u8>", // Default type
-      });
-    }
-
-    return {
-      name,
-      version: "1.0.0",
-      methods,
-      storage,
-      opcodes,
-    };
-  }
-
-  private parseMethodSignature(comment: string): {
-    name: string;
-    inputs: Array<{ name: string; type: AlkanesType }>;
-    outputs: Array<{ name: string; type: AlkanesType }>;
-  } {
-    // Updated regex to better handle method signatures
-    const match = comment.trim().match(/(\w+)\((.*?)\)/);
-    if (!match) {
-      return { name: "unknown", inputs: [], outputs: [] };
-    }
-
-    const [_, name, paramsStr] = match;
-    const inputs = paramsStr
-      .split(",")
-      .map((param) => param.trim())
-      .filter((param) => param.length > 0)
-      .map((param, index) => {
-        // Parse array types like "u128[2]"
-        const arrayMatch = param.match(/(\w+)\[(\d+)\]/);
-        if (arrayMatch) {
-          const [_, baseType, length] = arrayMatch;
-          return {
-            name: `param${index}`,
-            type: {
-              array: {
-                type: baseType as AlkanesPrimitive,
-                length: parseInt(length),
-              },
-            },
-          };
+    // Add any additional dependencies from config
+    if (this.options.dependencies) {
+      for (const [name, spec] of Object.entries(this.options.dependencies)) {
+        if (typeof spec === "string") {
+          cargoToml += `${name} = "${spec}"\n`;
+        } else {
+          let depSpec = "{ ";
+          if (spec.git) depSpec += `git = "${spec.git}"`;
+          if (spec.version)
+            depSpec += `${spec.git ? ", " : ""}version = "${spec.version}"`;
+          if (spec.features && spec.features.length) {
+            depSpec += `${
+              spec.git || spec.version ? ", " : ""
+            }features = [${spec.features.map((f) => `"${f}"`).join(", ")}]`;
+          }
+          depSpec += " }";
+          cargoToml += `${name} = ${depSpec}\n`;
         }
+      }
+    }
 
-        // Handle primitive types
-        return {
-          name: `param${index}`,
-          type: param as AlkanesPrimitive,
-        };
-      });
+    await fs.writeFile(path.join(tempDir, "Cargo.toml"), cargoToml);
+    await fs.writeFile(path.join(tempDir, "src", "lib.rs"), sourceCode);
+  }
 
-    return {
-      name,
-      inputs,
-      outputs: [], // Could parse return types later
-    };
+  async parseABI(sourceCode: string): Promise<AlkanesABI> {
+    const tempFile = path.join(".alkanes", "temp_contract.rs");
+    await fs.mkdir(".alkanes", { recursive: true });
+    await fs.writeFile(tempFile, sourceCode);
+
+    try {
+      // Ensure the binary path is correct
+      const rustBinary = path.join(
+        __dirname,
+        "../bin/abi_extractor/target/release/abi_extractor"
+      );
+
+      // Call the Rust-based ABI extractor
+      const { stdout } = await execAsync(`${rustBinary} ${tempFile}`);
+
+      return JSON.parse(stdout) as AlkanesABI;
+    } catch (error) {
+      throw new Error(
+        `Failed to extract ABI: ${
+          error instanceof Error ? error.message : error
+        }`
+      );
+    }
   }
 }
